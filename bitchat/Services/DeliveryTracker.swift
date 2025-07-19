@@ -9,7 +9,7 @@
 import Foundation
 import Combine
 
-class DeliveryTracker {
+class DeliveryTracker: @unchecked Sendable {
     static let shared = DeliveryTracker()
     
     // Track pending deliveries

@@ -22,7 +22,7 @@ enum ChannelVerificationStatus {
     case failed
 }
 
-class ChatViewModel: ObservableObject {
+class BitchatViewModel: ObservableObject, @unchecked Sendable {
     @Published var messages: [BitchatMessage] = []
     @Published var connectedPeers: [String] = []
     @Published var nickname: String = "" {
@@ -60,7 +60,7 @@ class ChatViewModel: ObservableObject {
     @Published var channelVerificationStatus: [String: ChannelVerificationStatus] = [:]  // Track verification status
     
     var meshService = BluetoothMeshService()
-    private let userDefaults = UserDefaults.standard
+    private let userDefaults = UserDefaults(suiteName: "group.chat.bitchat").unsafelyUnwrapped
     private let nicknameKey = "bitchat.nickname"
     private let joinedChannelsKey = "bitchat.joinedChannels"
     private let passwordProtectedChannelsKey = "bitchat.passwordProtectedChannels"
@@ -86,7 +86,7 @@ class ChatViewModel: ObservableObject {
     // Track sent read receipts to avoid duplicates
     private var sentReadReceipts: Set<String> = []  // messageID set
     
-    init() {
+    func startServices() {
         loadNickname()
         loadFavorites()
         loadJoinedChannels()
@@ -114,7 +114,9 @@ class ChatViewModel: ObservableObject {
         setupNoiseCallbacks()
         
         // Request notification permission
-        NotificationService.shared.requestAuthorization()
+        Task {
+            try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+        } 
         
         // Subscribe to delivery status updates
         deliveryTrackerCancellable = DeliveryTracker.shared.deliveryStatusUpdated
@@ -129,7 +131,7 @@ class ChatViewModel: ObservableObject {
             if self.connectedPeers.isEmpty && self.messages.isEmpty {
                 let welcomeMessage = BitchatMessage(
                     sender: "system",
-                    content: "get people around you to download bitchat…and chat with them here!",
+                    content: "Get people around you to download Meet and Eat and chat with them here!",
                     timestamp: Date(),
                     isRelay: false
                 )
@@ -194,8 +196,6 @@ class ChatViewModel: ObservableObject {
     deinit {
         // Ensure channel ownership data is saved
         saveChannelData()
-        // Force immediate save
-        userDefaults.synchronize()
     }
     
     private func loadNickname() {
@@ -209,7 +209,6 @@ class ChatViewModel: ObservableObject {
     
     func saveNickname() {
         userDefaults.set(nickname, forKey: nicknameKey)
-        userDefaults.synchronize() // Force immediate save
         
         // Send announce with new nickname to all peers
         meshService.sendBroadcastAnnounce()
@@ -253,7 +252,6 @@ class ChatViewModel: ObservableObject {
     
     private func saveJoinedChannels() {
         userDefaults.set(Array(joinedChannels), forKey: joinedChannelsKey)
-        userDefaults.synchronize()
     }
     
     private func loadChannelData() {
@@ -304,9 +302,6 @@ class ChatViewModel: ObservableObject {
             _ = KeychainManager.shared.saveChannelPassword(password, for: channel)
         }
         userDefaults.set(channelKeyCommitments, forKey: channelKeyCommitmentsKey)
-        
-        // Force synchronize and add a small delay to ensure writes complete
-        _ = userDefaults.synchronize()
         
         // Verify save worked
         _ = userDefaults.dictionary(forKey: channelCreatorsKey) as? [String: String] != nil
@@ -1551,7 +1546,6 @@ class ChatViewModel: ObservableObject {
     @objc private func appWillResignActive() {
         // Save all channel data
         saveChannelData()
-        userDefaults.synchronize()
     }
     
     @objc func applicationWillTerminate() {
@@ -1561,7 +1555,6 @@ class ChatViewModel: ObservableObject {
         
         // Save all channel data
         saveChannelData()
-        userDefaults.synchronize()
         
         // Verify identity key after save
         _ = KeychainManager.shared.verifyIdentityKeyExists()
@@ -1570,7 +1563,6 @@ class ChatViewModel: ObservableObject {
     @objc private func appWillTerminate() {
         // Save all channel data
         saveChannelData()
-        userDefaults.synchronize()
     }
     
     func markPrivateMessagesAsRead(from peerID: String) {
@@ -1743,9 +1735,6 @@ class ChatViewModel: ObservableObject {
         // This will force creation of a new identity (new fingerprint) on next launch
         meshService.emergencyDisconnectAll()
         
-        // Force immediate UserDefaults synchronization
-        userDefaults.synchronize()
-        
         // Force UI update
         objectWillChange.send()
         
@@ -1754,9 +1743,7 @@ class ChatViewModel: ObservableObject {
     
     
     func formatTimestamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+        return date.formatted(date: .omitted, time: .complete)
     }
     
     func getRSSIColor(rssi: Int, colorScheme: ColorScheme) -> Color {
@@ -2322,7 +2309,7 @@ class ChatViewModel: ObservableObject {
         
         // Set up authentication callback
         noiseService.onPeerAuthenticated = { [weak self] peerID, fingerprint in
-            DispatchQueue.main.async {
+//            DispatchQueue.main.async {
                 // Update encryption status
                 if self?.verifiedFingerprints.contains(fingerprint) == true {
                     self?.peerEncryptionStatus[peerID] = .noiseVerified
@@ -2334,23 +2321,23 @@ class ChatViewModel: ObservableObject {
                 #if DEBUG
                 NoiseTestingHelper.shared.logNoiseEvent("Peer authenticated", details: "PeerID: \(peerID), Fingerprint: \(fingerprint)")
                 #endif
-            }
+//            }
         }
         
         // Set up handshake required callback
         noiseService.onHandshakeRequired = { [weak self] peerID in
-            DispatchQueue.main.async {
+//            DispatchQueue.main.async {
                 self?.peerEncryptionStatus[peerID] = .noiseHandshaking
                 
                 #if DEBUG
                 NoiseTestingHelper.shared.logNoiseEvent("Handshake required", details: "PeerID: \(peerID)")
                 #endif
-            }
+//            }
         }
     }
 }
 
-extension ChatViewModel: BitchatDelegate {
+extension BitchatViewModel: @preconcurrency BitchatDelegate {
     func didReceiveChannelLeave(_ channel: String, from peerID: String) {
         // Remove peer from channel members
         if channelMembers[channel] != nil {
@@ -3002,7 +2989,7 @@ extension ChatViewModel: BitchatDelegate {
         }
     }
     
-    func didReceiveMessage(_ message: BitchatMessage) {
+    @MainActor func didReceiveMessage(_ message: BitchatMessage) {
         
         // Track sender as a channel member if this is a channel message
         if let channel = message.channel, let senderPeerID = message.senderPeerID {
@@ -3082,8 +3069,8 @@ extension ChatViewModel: BitchatDelegate {
                 
                 // Check if this is an action that should be converted to system message
                 let isActionMessage = messageToStore.content.hasPrefix("* ") && messageToStore.content.hasSuffix(" *") &&
-                                      (messageToStore.content.contains("🫂") || messageToStore.content.contains("🐟") || 
-                                       messageToStore.content.contains("took a screenshot"))
+                (messageToStore.content.contains("🫂") || messageToStore.content.contains("🐟") ||
+                 messageToStore.content.contains("took a screenshot"))
                 
                 if isActionMessage {
                     // Convert to system message
@@ -3280,8 +3267,8 @@ extension ChatViewModel: BitchatDelegate {
                 
                 // Check if this is an action that should be converted to system message
                 let isActionMessage = messageToAdd.content.hasPrefix("* ") && messageToAdd.content.hasSuffix(" *") &&
-                                      (messageToAdd.content.contains("🫂") || messageToAdd.content.contains("🐟") || 
-                                       messageToAdd.content.contains("took a screenshot"))
+                (messageToAdd.content.contains("🫂") || messageToAdd.content.contains("🐟") ||
+                 messageToAdd.content.contains("took a screenshot"))
                 
                 let finalMessage: BitchatMessage
                 if isActionMessage {
@@ -3322,8 +3309,8 @@ extension ChatViewModel: BitchatDelegate {
                             return true
                         }
                         // Check by content and sender with time window (within 1 second)
-                        if existingMsg.content == finalMessage.content && 
-                           existingMsg.sender == finalMessage.sender {
+                        if existingMsg.content == finalMessage.content &&
+                            existingMsg.sender == finalMessage.sender {
                             let timeDiff = abs(existingMsg.timestamp.timeIntervalSince(finalMessage.timestamp))
                             return timeDiff < 1.0
                         }
@@ -3364,8 +3351,8 @@ extension ChatViewModel: BitchatDelegate {
             
             // Check if this is an action that should be converted to system message
             let isActionMessage = message.content.hasPrefix("* ") && message.content.hasSuffix(" *") &&
-                                  (message.content.contains("🫂") || message.content.contains("🐟") || 
-                                   message.content.contains("took a screenshot"))
+            (message.content.contains("🫂") || message.content.contains("🐟") ||
+             message.content.contains("took a screenshot"))
             
             let finalMessage: BitchatMessage
             if isActionMessage {

@@ -12,7 +12,7 @@ import os.log
 
 // MARK: - Noise Encryption Service
 
-class NoiseEncryptionService {
+class NoiseEncryptionService: @unchecked Sendable {
     // Static identity key (persistent across sessions)
     private let staticIdentityKey: Curve25519.KeyAgreement.PrivateKey
     public let staticIdentityPublicKey: Curve25519.KeyAgreement.PublicKey
@@ -259,7 +259,9 @@ class NoiseEncryptionService {
         SecurityLogger.logSecurityEvent(.handshakeCompleted(peerID: peerID))
         
         // Notify about authentication
-        onPeerAuthenticated?(peerID, fingerprint)
+        Task { @MainActor in
+            onPeerAuthenticated?(peerID, fingerprint)
+        }
     }
     
     private func calculateFingerprint(for publicKey: Curve25519.KeyAgreement.PublicKey) -> String {

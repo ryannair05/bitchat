@@ -26,7 +26,7 @@ struct RetryableMessage {
     let nextRetryTime: Date
 }
 
-class MessageRetryService {
+class MessageRetryService: @unchecked Sendable {
     static let shared = MessageRetryService()
     
     private var retryQueue: [RetryableMessage] = []
@@ -145,7 +145,7 @@ class MessageRetryService {
                       let meshService = self.meshService else { return }
                 
                 // Check connectivity before retrying
-                let viewModel = meshService.delegate as? ChatViewModel
+                let viewModel = meshService.delegate as? BitchatViewModel
                 let connectedPeers = viewModel?.connectedPeers ?? []
                 
                 if message.isPrivate {

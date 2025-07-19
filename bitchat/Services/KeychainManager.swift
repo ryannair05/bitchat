@@ -11,7 +11,7 @@ import Security
 import os.log
 
 class KeychainManager {
-    static let shared = KeychainManager()
+    nonisolated(unsafe) static let shared = KeychainManager()
     
     // Use consistent service name for all keychain items
     private let service = "chat.bitchat"
@@ -24,8 +24,11 @@ class KeychainManager {
     
     private func cleanupLegacyKeychainItems() {
         // Check if we've already done cleanup
+        guard let userDefaults = UserDefaults(suiteName: "group.chat.bitchat") else {
+            return
+        }
         let cleanupKey = "bitchat.keychain.cleanup.v2"
-        if UserDefaults.standard.bool(forKey: cleanupKey) {
+        if userDefaults.bool(forKey: cleanupKey) {
             return
         }
         
@@ -81,7 +84,7 @@ class KeychainManager {
         
         
         // Mark cleanup as done
-        UserDefaults.standard.set(true, forKey: cleanupKey)
+        userDefaults.set(true, forKey: cleanupKey)
     }
     
     
@@ -275,7 +278,7 @@ class KeychainManager {
     
     // Force cleanup to run again (for development/testing)
     func resetCleanupFlag() {
-        UserDefaults.standard.removeObject(forKey: "bitchat.keychain.cleanup.v2")
+        UserDefaults(suiteName: "group.chat.bitchat")?.removeObject(forKey: "bitchat.keychain.cleanup.v2")
     }
     
     

@@ -9,7 +9,7 @@
 import Foundation
 import CryptoKit
 
-class SecureIdentityStateManager {
+class SecureIdentityStateManager: @unchecked Sendable {
     static let shared = SecureIdentityStateManager()
     
     private let keychain = KeychainManager.shared

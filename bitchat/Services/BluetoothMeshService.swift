@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import CoreBluetooth
+@preconcurrency import CoreBluetooth
 import Combine
 import CryptoKit
 import os.log
@@ -61,7 +61,7 @@ enum VersionNegotiationState {
     case failed(reason: String)
 }
 
-class BluetoothMeshService: NSObject {
+class BluetoothMeshService: NSObject, @unchecked Sendable {
     static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C")
     static let characteristicUUID = CBUUID(string: "A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D")
     
@@ -402,7 +402,7 @@ class BluetoothMeshService: NSObject {
     
     // MARK: - Peer ID Rotation
     
-    private func generateNewPeerID() -> String {
+    private static func generateNewPeerID() -> String {
         // Generate 8 random bytes (64 bits) for strong collision resistance
         var randomBytes = [UInt8](repeating: 0, count: 8)
         let result = SecRandomCopyBytes(kSecRandomDefault, 8, &randomBytes)
@@ -442,7 +442,7 @@ class BluetoothMeshService: NSObject {
             self.rotationTimestamp = Date()
             
             // Generate new peer ID
-            self.myPeerID = self.generateNewPeerID()
+            self.myPeerID = BluetoothMeshService.generateNewPeerID()
             
             // Update advertising with new peer ID
             DispatchQueue.main.async { [weak self] in
@@ -462,7 +462,7 @@ class BluetoothMeshService: NSObject {
     private func scheduleRotation(delay: TimeInterval) {
         DispatchQueue.main.async { [weak self] in
             self?.rotationTimer?.invalidate()
-            self?.rotationTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
+            self?.rotationTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 self?.rotatePeerID()
             }
         }
@@ -507,69 +507,8 @@ class BluetoothMeshService: NSObject {
     
     override init() {
         // Generate ephemeral peer ID for each session to prevent tracking
-        self.myPeerID = ""
+        self.myPeerID = BluetoothMeshService.generateNewPeerID()
         super.init()
-        self.myPeerID = generateNewPeerID()
-        
-        centralManager = CBCentralManager(delegate: self, queue: nil)
-        peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
-        
-        // Start bloom filter reset timer (reset every 5 minutes)
-        bloomFilterResetTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
-            self?.messageQueue.async(flags: .barrier) {
-                guard let self = self else { return }
-                
-                // Adapt Bloom filter size based on network size
-                let networkSize = self.estimatedNetworkSize
-                self.messageBloomFilter = OptimizedBloomFilter.adaptive(for: networkSize)
-                
-                // Clear other duplicate detection sets
-                self.processedMessages.removeAll()
-                
-            }
-        }
-        
-        // Start stale peer cleanup timer (every 30 seconds)
-        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            self?.cleanupStalePeers()
-        }
-        
-        // Schedule first peer ID rotation
-        scheduleNextRotation()
-        
-        // Setup noise callbacks
-        noiseService.onPeerAuthenticated = { [weak self] peerID, fingerprint in
-            // Get peer's public key data from noise service
-            if let publicKeyData = self?.noiseService.getPeerPublicKeyData(peerID) {
-                // Register with ChatViewModel for verification tracking
-                DispatchQueue.main.async {
-                    (self?.delegate as? ChatViewModel)?.registerPeerPublicKey(peerID: peerID, publicKeyData: publicKeyData)
-                }
-            }
-            
-            // Send regular announce packet when authenticated to trigger connect message
-            // This covers the case where we're the responder in the handshake
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.sendAnnouncementToPeer(peerID)
-            }
-        }
-        
-        // Register for app termination notifications
-        #if os(macOS)
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appWillTerminate),
-            name: NSApplication.willTerminateNotification,
-            object: nil
-        )
-        #else
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appWillTerminate),
-            name: UIApplication.willTerminateNotification,
-            object: nil
-        )
-        #endif
     }
     
     deinit {
@@ -628,6 +567,69 @@ class BluetoothMeshService: NSObject {
     }
     
     func startServices() {
+        if centralManager == nil {
+            centralManager = CBCentralManager(delegate: self, queue: nil)
+            peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
+            
+            // Start bloom filter reset timer (reset every 5 minutes)
+            bloomFilterResetTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
+                self?.messageQueue.async(flags: .barrier) { [weak self] in
+                    guard let self = self else { return }
+                    
+                    // Adapt Bloom filter size based on network size
+                    let networkSize = self.estimatedNetworkSize
+                    self.messageBloomFilter = OptimizedBloomFilter.adaptive(for: networkSize)
+                    
+                    // Clear other duplicate detection sets
+                    self.processedMessages.removeAll()
+                    
+                }
+            }
+            
+            // Start stale peer cleanup timer (every 30 seconds)
+            cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+                self?.cleanupStalePeers()
+            }
+            
+            // Schedule first peer ID rotation
+            scheduleNextRotation()
+            
+            // Setup noise callbacks
+            noiseService.onPeerAuthenticated = { [weak self] peerID, fingerprint in
+                // Get peer's public key data from noise service
+                if let publicKeyData = self?.noiseService.getPeerPublicKeyData(peerID) {
+                    // Register with ChatViewModel for verification tracking
+                    //                DispatchQueue.main.async {
+                    (self?.delegate as? BitchatViewModel)?.registerPeerPublicKey(peerID: peerID, publicKeyData: publicKeyData)
+                    //                }
+                }
+                
+                // Send regular announce packet when authenticated to trigger connect message
+                // This covers the case where we're the responder in the handshake
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.sendAnnouncementToPeer(peerID)
+                }
+            }
+            
+            // Register for app termination notifications
+#if os(macOS)
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(appWillTerminate),
+                name: NSApplication.willTerminateNotification,
+                object: nil
+            )
+#else
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(appWillTerminate),
+                name: UIApplication.willTerminateNotification,
+                object: nil
+            )
+#endif
+        }
+        
+        
         // Starting services
         // Start both central and peripheral services
         if centralManager?.state == .poweredOn {
@@ -651,7 +653,7 @@ class BluetoothMeshService: NSObject {
     }
     
     func sendBroadcastAnnounce() {
-        guard let vm = delegate as? ChatViewModel else { return }
+        guard let vm = delegate as? BitchatViewModel else { return }
         
         
         let announcePacket = BitchatPacket(
@@ -772,7 +774,7 @@ class BluetoothMeshService: NSObject {
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             
-            let nickname = self.delegate as? ChatViewModel
+            let nickname = self.delegate as? BitchatViewModel
             let senderNick = nickname?.nickname ?? self.myPeerID
             
             let message = BitchatMessage(
@@ -1109,7 +1111,7 @@ class BluetoothMeshService: NSObject {
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             
-            let nickname = self.delegate as? ChatViewModel
+            let nickname = self.delegate as? BitchatViewModel
             let senderNick = nickname?.nickname ?? self.myPeerID
             
             // Encrypt the content
@@ -1161,7 +1163,7 @@ class BluetoothMeshService: NSObject {
     }
     
     private func sendAnnouncementToPeer(_ peerID: String) {
-        guard let vm = delegate as? ChatViewModel else { return }
+        guard let vm = delegate as? BitchatViewModel else { return }
         
         
         // Always send announce, don't check if already announced
@@ -1193,7 +1195,7 @@ class BluetoothMeshService: NSObject {
     }
     
     private func sendLeaveAnnouncement() {
-        guard let vm = delegate as? ChatViewModel else { return }
+        guard let vm = delegate as? BitchatViewModel else { return }
         
         let packet = BitchatPacket(
             type: MessageType.leave.rawValue,
@@ -1640,7 +1642,7 @@ class BluetoothMeshService: NSObject {
                     var channelKeyData: Data? = nil
                     if let channel = message.channel, message.isEncrypted {
                         // This is an encrypted channel message
-                        if let viewModel = delegate as? ChatViewModel,
+                        if let viewModel = delegate as? BitchatViewModel,
                            let channelKey = viewModel.channelKeys[channel] {
                             channelKeyData = channelKey.withUnsafeBytes { Data($0) }
                         }
@@ -1795,7 +1797,7 @@ class BluetoothMeshService: NSObject {
                         }
                         
                         // Generate and send ACK for channel messages if we're mentioned or it's a small channel
-                        let viewModel = self.delegate as? ChatViewModel
+                        let viewModel = self.delegate as? BitchatViewModel
                         let myNickname = viewModel?.nickname ?? self.myPeerID
                         if let _ = message.channel,
                            let mentions = message.mentions,
@@ -1880,7 +1882,7 @@ class BluetoothMeshService: NSObject {
                             senderPeerID: senderID,
                             mentions: message.mentions,
                             channel: message.channel,
-                            deliveryStatus: nil  // Will be set to .delivered in ChatViewModel
+                            deliveryStatus: nil  // Will be set to .delivered in BitchatViewModel
                         )
                         
                         // Track last message time from this peer
@@ -1892,7 +1894,7 @@ class BluetoothMeshService: NSObject {
                         }
                         
                         // Generate and send ACK for private messages
-                        let viewModel = self.delegate as? ChatViewModel
+                        let viewModel = self.delegate as? BitchatViewModel
                         let myNickname = viewModel?.nickname ?? self.myPeerID
                         if let ack = DeliveryTracker.shared.generateAck(
                             for: messageWithPeerID,
@@ -2327,9 +2329,9 @@ class BluetoothMeshService: NSObject {
                 // Update our mappings
                 updatePeerBinding(announcement.peerID, fingerprint: fingerprint, binding: binding)
                 
-                // Register the peer's public key with ChatViewModel for verification tracking
+                // Register the peer's public key with BitchatViewModel for verification tracking
                 DispatchQueue.main.async { [weak self] in
-                    (self?.delegate as? ChatViewModel)?.registerPeerPublicKey(peerID: announcement.peerID, publicKeyData: announcement.publicKey)
+                    (self?.delegate as? BitchatViewModel)?.registerPeerPublicKey(peerID: announcement.peerID, publicKeyData: announcement.publicKey)
                 }
                 
                 // If we don't have a session yet, check if we should initiate
@@ -2346,11 +2348,11 @@ class BluetoothMeshService: NSObject {
                         sendNoiseIdentityAnnounce(to: announcement.peerID)
                     }
                 } else {
-                    // We already have a session, but ensure ChatViewModel knows about the fingerprint
+                    // We already have a session, but ensure BitchatViewModel knows about the fingerprint
                     // This handles the case where handshake completed before identity announcement
                     DispatchQueue.main.async { [weak self] in
                         if let publicKeyData = self?.noiseService.getPeerPublicKeyData(announcement.peerID) {
-                            (self?.delegate as? ChatViewModel)?.registerPeerPublicKey(peerID: announcement.peerID, publicKeyData: publicKeyData)
+                            (self?.delegate as? BitchatViewModel)?.registerPeerPublicKey(peerID: announcement.peerID, publicKeyData: publicKeyData)
                         }
                     }
                 }
@@ -2741,9 +2743,9 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
             if pooledPeripheral.state == CBPeripheralState.disconnected {
                 // Reconnect if disconnected
                 central.connect(pooledPeripheral, options: [
-                    CBConnectPeripheralOptionNotifyOnConnectionKey: true,
-                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-                    CBConnectPeripheralOptionNotifyOnNotificationKey: true
+                    CBConnectPeripheralOptionNotifyOnConnectionKey: false,
+                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: false,
+                    CBConnectPeripheralOptionNotifyOnNotificationKey: false
                 ])
             }
             return
@@ -2763,9 +2765,9 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
             if attempts < maxConnectionAttempts {
                 // Use optimized connection parameters for better range
                 let connectionOptions: [String: Any] = [
-                    CBConnectPeripheralOptionNotifyOnConnectionKey: true,
-                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-                    CBConnectPeripheralOptionNotifyOnNotificationKey: true
+                    CBConnectPeripheralOptionNotifyOnConnectionKey: false,
+                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: false,
+                    CBConnectPeripheralOptionNotifyOnNotificationKey: false
                 ]
                 
                 central.connect(peripheral, options: connectionOptions)
@@ -2920,11 +2922,11 @@ extension BluetoothMeshService: CBPeripheralDelegate {
                 
                 // Send announce packet after version negotiation completes
                 // Send multiple times for reliability
-                if let vm = self.delegate as? ChatViewModel {
+//                if let vm = self.delegate as? BitchatViewModel {
                     // Send announces multiple times with delays
                     for delay in [0.3, 0.8, 1.5] {
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                            guard let self = self else { return }
+                            guard let self = self, let vm = self.delegate as? BitchatViewModel else { return }
                             let announcePacket = BitchatPacket(
                                 type: MessageType.announce.rawValue,
                                 ttl: 3,
@@ -2933,11 +2935,12 @@ extension BluetoothMeshService: CBPeripheralDelegate {
                             )
                             self.broadcastPacket(announcePacket)
                         }
-                    }
+//                    }
                     
                     // Also send targeted announce to this specific peripheral
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak peripheral] in
                         guard let self = self,
+                              let vm = self.delegate as? BitchatViewModel,
                               let peripheral = peripheral,
                               peripheral.state == .connected,
                               let characteristic = peripheral.services?.first(where: { $0.uuid == BluetoothMeshService.serviceUUID })?.characteristics?.first(where: { $0.uuid == BluetoothMeshService.characteristicUUID }) else { return }
@@ -3525,7 +3528,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     private func handleChannelKeyVerifyRequest(from peerID: String, data: Data) {
         guard let request = ChannelKeyVerifyRequest.decode(from: data) else { return }
         
-        // Forward to delegate (ChatViewModel) to handle
+        // Forward to delegate (BitchatViewModel) to handle
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.didReceiveChannelKeyVerifyRequest(request, from: peerID)
         }
@@ -3534,7 +3537,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     private func handleChannelKeyVerifyResponse(from peerID: String, data: Data) {
         guard let response = ChannelKeyVerifyResponse.decode(from: data) else { return }
         
-        // Forward to delegate (ChatViewModel) to handle
+        // Forward to delegate (BitchatViewModel) to handle
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.didReceiveChannelKeyVerifyResponse(response, from: peerID)
         }
@@ -3551,7 +3554,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             // Parse the password update
             guard let update = ChannelPasswordUpdate.decode(from: decryptedData) else { return }
             
-            // Forward to delegate (ChatViewModel) to handle
+            // Forward to delegate (BitchatViewModel) to handle
             DispatchQueue.main.async { [weak self] in
                 self?.delegate?.didReceiveChannelPasswordUpdate(update, from: peerID)
             }
@@ -3563,7 +3566,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         // Channel metadata is broadcast unencrypted (like channel announcements)
         guard let metadata = ChannelMetadata.decode(from: data) else { return }
         
-        // Forward to delegate (ChatViewModel) to handle
+        // Forward to delegate (BitchatViewModel) to handle
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.didReceiveChannelMetadata(metadata, from: peerID)
         }
@@ -3804,7 +3807,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         let staticKey = noiseService.getStaticPublicKeyData()
         
         // Get nickname from delegate
-        let nickname = (delegate as? ChatViewModel)?.nickname ?? "Anonymous"
+        let nickname = (delegate as? BitchatViewModel)?.nickname ?? "Anonymous"
         
         // Create the binding data to sign
         let bindingData = myPeerID.data(using: .utf8)! + staticKey + now.timeIntervalSince1970.data
@@ -3895,7 +3898,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         
         
         // Get sender nickname from delegate
-        let nickname = self.delegate as? ChatViewModel
+        let nickname = self.delegate as? BitchatViewModel
         let senderNick = nickname?.nickname ?? self.myPeerID
         
         // Create the inner message

@@ -14,18 +14,10 @@ import UIKit
 import AppKit
 #endif
 
-class NotificationService {
+@MainActor class NotificationService {
     static let shared = NotificationService()
     
     private init() {}
-    
-    func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            if granted {
-                // Permission granted
-            }
-        }
-    }
     
     func sendLocalNotification(title: String, body: String, identifier: String) {
         // Check if app is in foreground
@@ -61,7 +53,7 @@ class NotificationService {
     }
     
     func sendMentionNotification(from sender: String, message: String) {
-        let title = "＠🫵 you were mentioned by \(sender)"
+        let title = "\(sender) mentioned you"
         let body = message
         let identifier = "mention-\(UUID().uuidString)"
         
@@ -69,7 +61,7 @@ class NotificationService {
     }
     
     func sendPrivateMessageNotification(from sender: String, message: String) {
-        let title = "🔒 private message from \(sender)"
+        let title = "Private message from \(sender)"
         let body = message
         let identifier = "private-\(UUID().uuidString)"
         
@@ -77,7 +69,7 @@ class NotificationService {
     }
     
     func sendFavoriteOnlineNotification(nickname: String) {
-        let title = "⭐ \(nickname) is online"
+        let title = "\(nickname) is online"
         let body = "wanna get in there?"
         let identifier = "favorite-online-\(UUID().uuidString)"
         

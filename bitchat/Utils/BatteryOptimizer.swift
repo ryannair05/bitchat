@@ -67,7 +67,7 @@ enum PowerMode {
     }
 }
 
-class BatteryOptimizer {
+class BatteryOptimizer: @unchecked Sendable {
     static let shared = BatteryOptimizer()
     
     @Published var currentPowerMode: PowerMode = .balanced
@@ -112,7 +112,9 @@ class BatteryOptimizer {
         )
         
         // Monitor battery
-        UIDevice.current.isBatteryMonitoringEnabled = true
+        Task { @MainActor in
+            UIDevice.current.isBatteryMonitoringEnabled = true
+        }
         
         observers.append(
             NotificationCenter.default.addObserver(
@@ -137,22 +139,24 @@ class BatteryOptimizer {
     }
     
     private func updateBatteryStatus() {
-        #if os(iOS)
-        batteryLevel = UIDevice.current.batteryLevel
-        if batteryLevel < 0 {
-            batteryLevel = 1.0 // Unknown battery level
+        Task { @MainActor in
+#if os(iOS)
+            batteryLevel = UIDevice.current.batteryLevel
+            if batteryLevel < 0 {
+                batteryLevel = 1.0 // Unknown battery level
+            }
+            
+            isCharging = UIDevice.current.batteryState == .charging || 
+            UIDevice.current.batteryState == .full
+#elseif os(macOS)
+            if let info = getMacOSBatteryInfo() {
+                batteryLevel = info.level
+                isCharging = info.isCharging
+            }
+#endif
+            
+            updatePowerMode()
         }
-        
-        isCharging = UIDevice.current.batteryState == .charging || 
-                     UIDevice.current.batteryState == .full
-        #elseif os(macOS)
-        if let info = getMacOSBatteryInfo() {
-            batteryLevel = info.level
-            isCharging = info.isCharging
-        }
-        #endif
-        
-        updatePowerMode()
     }
     
     #if os(macOS)

@@ -12,7 +12,7 @@ import os.log
 
 // MARK: - Noise Channel Encryption
 
-class NoiseChannelEncryption {
+class NoiseChannelEncryption: @unchecked Sendable {
     // Channel keys derived from passwords
     private var channelKeys: [String: SymmetricKey] = [:]
     private let keyQueue = DispatchQueue(label: "chat.bitchat.noise.channels", attributes: .concurrent)

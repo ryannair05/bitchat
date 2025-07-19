@@ -10,7 +10,7 @@ import SwiftUI
 
 #if DEBUG
 struct NoiseTestingView: View {
-    @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject var viewModel: BitchatViewModel
     @Environment(\.colorScheme) var colorScheme
     @State private var testChecklist = NoiseTestingHelper.shared.getTestChecklist()
     

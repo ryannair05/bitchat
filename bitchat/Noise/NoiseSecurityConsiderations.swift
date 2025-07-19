@@ -75,7 +75,7 @@ struct NoiseSecurityValidator {
 
 // MARK: - Enhanced Noise Session with Security
 
-class SecureNoiseSession: NoiseSession {
+class SecureNoiseSession: NoiseSession, @unchecked Sendable {
     private(set) var messageCount: UInt64 = 0
     private let sessionStartTime = Date()
     private(set) var lastActivityTime = Date()
@@ -149,7 +149,7 @@ class SecureNoiseSession: NoiseSession {
 
 // MARK: - Rate Limiter
 
-class NoiseRateLimiter {
+class NoiseRateLimiter: @unchecked Sendable {
     private var handshakeTimestamps: [String: [Date]] = [:] // peerID -> timestamps
     private var messageTimestamps: [String: [Date]] = [:] // peerID -> timestamps
     

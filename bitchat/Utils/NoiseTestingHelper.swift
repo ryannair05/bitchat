@@ -48,7 +48,7 @@ public enum EncryptionStatus {
 
 #if DEBUG
 class NoiseTestingHelper {
-    static let shared = NoiseTestingHelper()
+    nonisolated(unsafe) static let shared = NoiseTestingHelper()
     
     // Test Scenarios Checklist
     struct TestScenario {
