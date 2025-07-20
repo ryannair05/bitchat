@@ -2667,18 +2667,27 @@ class BluetoothMeshService: NSObject, @unchecked Sendable {
 extension BluetoothMeshService: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Central manager state updated
-        switch central.state {
-        case .unknown: break
-        case .resetting: break
-        case .unsupported: break
-        case .unauthorized: break
-        case .poweredOff: break
-        case .poweredOn: break
-        @unknown default: break
-        }
+//        switch central.state {
+//        case .unknown: break
+//        case .resetting: break
+//        case .unsupported: break
+//        case .unauthorized: break
+//        case .poweredOff: break
+//        case .poweredOn: break
+//        @unknown default: break
+//        }
         
         if central.state == .unsupported {
         } else if central.state == .unauthorized {
+            if let vm = self.delegate as? BitchatViewModel {
+                let welcomeMessage = BitchatMessage(
+                    sender: "system",
+                    content: "Turn on Bluetooth for Meet and Eat to Chat!",
+                    timestamp: Date(),
+                    isRelay: false
+                )
+                vm.messages.append(welcomeMessage)
+            }
         } else if central.state == .poweredOff {
         } else if central.state == .poweredOn {
             startScanning()

@@ -10,7 +10,7 @@ import SwiftUI
 import UserNotifications
 
 struct BitchatApp: View {
-    @StateObject private var chatViewModel = BitchatViewModel()
+    @State private var chatViewModel = BitchatViewModel()
     
     init() {
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
@@ -18,7 +18,7 @@ struct BitchatApp: View {
     
     var body: some View {
         BitchatContentView()
-            .environmentObject(chatViewModel)
+            .environment(chatViewModel)
             .onAppear {
                 chatViewModel.startServices()
                 NotificationDelegate.shared.chatViewModel = chatViewModel

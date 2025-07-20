@@ -22,10 +22,10 @@ enum ChannelVerificationStatus {
     case failed
 }
 
-class BitchatViewModel: ObservableObject, @unchecked Sendable {
-    @Published var messages: [BitchatMessage] = []
-    @Published var connectedPeers: [String] = []
-    @Published var nickname: String = "" {
+@Observable class BitchatViewModel: @unchecked Sendable {
+    internal var messages: [BitchatMessage] = []
+    internal var connectedPeers: [String] = []
+    internal var nickname: String = "" {
         didSet {
             nicknameSaveTimer?.invalidate()
             nicknameSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
@@ -33,33 +33,33 @@ class BitchatViewModel: ObservableObject, @unchecked Sendable {
             }
         }
     }
-    @Published var isConnected = false
-    @Published var privateChats: [String: [BitchatMessage]] = [:] // peerID -> messages
-    @Published var selectedPrivateChatPeer: String? = nil
-    private var selectedPrivateChatFingerprint: String? = nil  // Track by fingerprint for persistence across reconnections
-    @Published var unreadPrivateMessages: Set<String> = []
-    @Published var autocompleteSuggestions: [String] = []
-    @Published var showAutocomplete: Bool = false
-    @Published var autocompleteRange: NSRange? = nil
-    @Published var selectedAutocompleteIndex: Int = 0
+    internal var isConnected = false
+    internal var privateChats: [String: [BitchatMessage]] = [:] // peerID -> messages
+    internal var selectedPrivateChatPeer: String? = nil
+    @ObservationIgnored private var selectedPrivateChatFingerprint: String? = nil  // Track by fingerprint for persistence across reconnections
+    internal var unreadPrivateMessages: Set<String> = []
+    internal var autocompleteSuggestions: [String] = []
+    internal var showAutocomplete: Bool = false
+    internal var autocompleteRange: NSRange? = nil
+    internal var selectedAutocompleteIndex: Int = 0
     
     // Channel support
-    @Published var joinedChannels: Set<String> = []  // Set of channel hashtags
-    @Published var currentChannel: String? = nil  // Currently selected channel
-    @Published var channelMessages: [String: [BitchatMessage]] = [:]  // channel -> messages
-    @Published var unreadChannelMessages: [String: Int] = [:]  // channel -> unread count
-    @Published var channelMembers: [String: Set<String>] = [:]  // channel -> set of peer IDs who have sent messages
-    @Published var channelPasswords: [String: String] = [:]  // channel -> password (stored locally only)
-    @Published var channelKeys: [String: SymmetricKey] = [:]  // channel -> derived encryption key
-    @Published var passwordProtectedChannels: Set<String> = []  // Set of channels that require passwords
-    @Published var channelCreators: [String: String] = [:]  // channel -> creator peerID
-    @Published var channelKeyCommitments: [String: String] = [:]  // channel -> SHA256(derivedKey) for verification
-    @Published var channelMetadata: [String: ChannelMetadata] = [:]  // channel -> metadata from creator
-    @Published var showPasswordPrompt: Bool = false
-    @Published var passwordPromptChannel: String? = nil
-    @Published var channelVerificationStatus: [String: ChannelVerificationStatus] = [:]  // Track verification status
+    internal var joinedChannels: Set<String> = []  // Set of channel hashtags
+    internal var currentChannel: String? = nil  // Currently selected channel
+    internal var channelMessages: [String: [BitchatMessage]] = [:]  // channel -> messages
+    internal var unreadChannelMessages: [String: Int] = [:]  // channel -> unread count
+    internal var channelMembers: [String: Set<String>] = [:]  // channel -> set of peer IDs who have sent messages
+    internal var channelPasswords: [String: String] = [:]  // channel -> password (stored locally only)
+    internal var channelKeys: [String: SymmetricKey] = [:]  // channel -> derived encryption key
+    internal var passwordProtectedChannels: Set<String> = []  // Set of channels that require passwords
+    internal var channelCreators: [String: String] = [:]  // channel -> creator peerID
+    internal var channelKeyCommitments: [String: String] = [:]  // channel -> SHA256(derivedKey) for verification
+    internal var channelMetadata: [String: ChannelMetadata] = [:]  // channel -> metadata from creator
+    internal var showPasswordPrompt: Bool = false
+    internal var passwordPromptChannel: String? = nil
+    internal var channelVerificationStatus: [String: ChannelVerificationStatus] = [:]  // Track verification status
     
-    var meshService = BluetoothMeshService()
+    internal let meshService = BluetoothMeshService()
     private let userDefaults = UserDefaults(suiteName: "group.chat.bitchat").unsafelyUnwrapped
     private let nicknameKey = "bitchat.nickname"
     private let joinedChannelsKey = "bitchat.joinedChannels"
@@ -67,24 +67,24 @@ class BitchatViewModel: ObservableObject, @unchecked Sendable {
     private let channelCreatorsKey = "bitchat.channelCreators"
     // private let channelPasswordsKey = "bitchat.channelPasswords" // Now using Keychain
     private let channelKeyCommitmentsKey = "bitchat.channelKeyCommitments"
-    private var nicknameSaveTimer: Timer?
+    @ObservationIgnored private var nicknameSaveTimer: Timer?
     
-    @Published var favoritePeers: Set<String> = []  // Now stores public key fingerprints instead of peer IDs
-    private var peerIDToPublicKeyFingerprint: [String: String] = [:]  // Maps ephemeral peer IDs to persistent fingerprints
-    private var blockedUsers: Set<String> = []  // Stores public key fingerprints of blocked users
+    internal var favoritePeers: Set<String> = []  // Now stores public key fingerprints instead of peer IDs
+    @ObservationIgnored private var peerIDToPublicKeyFingerprint: [String: String] = [:]  // Maps ephemeral peer IDs to persistent fingerprints
+    @ObservationIgnored private var blockedUsers: Set<String> = []  // Stores public key fingerprints of blocked users
     
     // Noise Protocol encryption status
-    @Published var peerEncryptionStatus: [String: EncryptionStatus] = [:]  // peerID -> encryption status
-    @Published var verifiedFingerprints: Set<String> = []  // Set of verified fingerprints
-    @Published var showingFingerprintFor: String? = nil  // Currently showing fingerprint sheet for peer
+    internal var peerEncryptionStatus: [String: EncryptionStatus] = [:]  // peerID -> encryption status
+    internal var verifiedFingerprints: Set<String> = []  // Set of verified fingerprints
+    internal var showingFingerprintFor: String? = nil  // Currently showing fingerprint sheet for peer
     
     // Messages are naturally ephemeral - no persistent storage
     
     // Delivery tracking
-    private var deliveryTrackerCancellable: AnyCancellable?
+    @ObservationIgnored private var deliveryTrackerCancellable: AnyCancellable?
     
     // Track sent read receipts to avoid duplicates
-    private var sentReadReceipts: Set<String> = []  // messageID set
+    @ObservationIgnored private var sentReadReceipts: Set<String> = []  // messageID set
     
     func startServices() {
         loadNickname()
@@ -1368,7 +1368,7 @@ class BitchatViewModel: ObservableObject, @unchecked Sendable {
         DeliveryTracker.shared.trackMessage(message, recipientID: peerID, recipientNickname: recipientNickname, isFavorite: isFavorite)
         
         // Trigger UI update
-        objectWillChange.send()
+//        objectWillChange.send()
         
         // Send via mesh with the same message ID
         meshService.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname, messageID: message.id)
@@ -1736,7 +1736,7 @@ class BitchatViewModel: ObservableObject, @unchecked Sendable {
         meshService.emergencyDisconnectAll()
         
         // Force UI update
-        objectWillChange.send()
+//        objectWillChange.send()
         
     }
     
@@ -2344,7 +2344,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
             channelMembers[channel]?.remove(peerID)
             
             // Force UI update
-            objectWillChange.send()
+//            objectWillChange.send()
         }
     }
     
@@ -3097,7 +3097,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
                 // Debug logging
                 
                 // Trigger UI update for private chats
-                objectWillChange.send()
+//                objectWillChange.send()
                 
                 // Check if we're in a private chat with this peer's fingerprint
                 // This handles reconnections with new peer IDs
@@ -3411,6 +3411,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
             }
         }
         
+      
         // Check if we're mentioned
         let isMentioned = message.mentions?.contains(nickname) ?? false
         
@@ -3421,9 +3422,12 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
             NotificationService.shared.sendPrivateMessageNotification(from: message.sender, message: message.content)
         }
         
+        
         #if os(iOS)
         // Haptic feedback for iOS only
-        
+        guard UIApplication.shared.applicationState == .active else {
+            return
+        }
         // Check if this is a hug message directed at the user
         let isHugForMe = message.content.contains("🫂") && 
                          (message.content.contains("hugs \(nickname)") ||
@@ -3527,7 +3531,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
         messages.append(systemMessage)
         
         // Force UI update
-        objectWillChange.send()
+//        objectWillChange.send()
     }
     
     func didDisconnectFromPeer(_ peerID: String) {
@@ -3547,7 +3551,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
         messages.append(systemMessage)
         
         // Force UI update
-        objectWillChange.send()
+//        objectWillChange.send()
     }
     
     func didUpdatePeerList(_ peers: [String]) {
@@ -3575,7 +3579,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
                 }
             }
             // Explicitly notify SwiftUI that the object has changed.
-            self.objectWillChange.send()
+//            self.objectWillChange.send()
             
             // Check if we need to update private chat peer after reconnection
             if self.selectedPrivateChatFingerprint != nil {
@@ -3683,7 +3687,7 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.privateChats = updatedPrivateChats
-            self.objectWillChange.send()
+//            self.objectWillChange.send()
         }
         
         // Update in channel messages
@@ -3697,9 +3701,9 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
                     channelMessages[channel] = channelMsgs
                     
                     // Force UI update
-                    DispatchQueue.main.async { [weak self] in
-                        self?.objectWillChange.send()
-                    }
+//                    DispatchQueue.main.async { [weak self] in
+//                        self?.objectWillChange.send()
+//                    }
                 }
             }
         }
@@ -3748,9 +3752,9 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
             // Mark channel as successfully joined
             if joinedChannels.contains(response.channel) {
                 // Update UI to show successful verification
-                DispatchQueue.main.async { [weak self] in
-                    self?.objectWillChange.send()
-                }
+//                DispatchQueue.main.async { [weak self] in
+//                    self?.objectWillChange.send()
+//                }
             }
         } else {
             // Our key was rejected - we have the wrong password
@@ -3818,9 +3822,9 @@ extension BitchatViewModel: @preconcurrency BitchatDelegate {
         }
         
         // Force UI update
-        DispatchQueue.main.async { [weak self] in
-            self?.objectWillChange.send()
-        }
+//        DispatchQueue.main.async { [weak self] in
+//            self?.objectWillChange.send()
+//        }
     }
     
     func didReceiveChannelMetadata(_ metadata: ChannelMetadata, from peerID: String) {

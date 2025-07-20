@@ -9,7 +9,8 @@
 import SwiftUI
 
 struct BitchatContentView: View {
-    @EnvironmentObject var viewModel: BitchatViewModel
+//    @EnvironmentObject var viewModel: BitchatViewModel
+    @Environment(BitchatViewModel.self) private var viewModel
     @State private var messageText = ""
     @State private var textFieldSelection: NSRange? = nil
     @FocusState private var isTextFieldFocused: Bool
@@ -147,12 +148,12 @@ struct BitchatContentView: View {
         #if os(macOS)
         .frame(minWidth: 600, minHeight: 400)
         #endif
-        .onChange(of: viewModel.selectedPrivateChatPeer) { newValue in
+        .onChange(of: viewModel.selectedPrivateChatPeer) { oldValue, newValue in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 showPrivateChat = newValue != nil
             }
         }
-        .onChange(of: viewModel.currentChannel) { newValue in
+        .onChange(of: viewModel.currentChannel) { oldValue, newValue in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 showChannel = newValue != nil
             }
@@ -287,25 +288,25 @@ struct BitchatContentView: View {
                 .padding(.vertical, 8)
             }
             .background(backgroundColor)
-            .onChange(of: viewModel.messages.count) { _ in
-                if channel == nil && privatePeer == nil && !viewModel.messages.isEmpty {
+            .onChange(of: viewModel.messages) { oldValue, newValue in
+                if channel == nil && privatePeer == nil && !newValue.isEmpty {
                     withAnimation {
-                        proxy.scrollTo(viewModel.messages.last?.id, anchor: .bottom)
+                        proxy.scrollTo(newValue.last?.id, anchor: .bottom)
                     }
                 }
             }
-            .onChange(of: viewModel.privateChats) { _ in
+            .onChange(of: viewModel.privateChats) { oldValue, newValue in
                 if let peerID = privatePeer,
-                   let messages = viewModel.privateChats[peerID],
+                   let messages = newValue[peerID],
                    !messages.isEmpty {
                     withAnimation {
                         proxy.scrollTo(messages.last?.id, anchor: .bottom)
                     }
                 }
             }
-            .onChange(of: viewModel.channelMessages) { _ in
+            .onChange(of: viewModel.channelMessages) { oldValue, newValue in
                 if let channelName = channel,
-                   let messages = viewModel.channelMessages[channelName],
+                   let messages = newValue[channelName],
                    !messages.isEmpty {
                     withAnimation {
                         proxy.scrollTo(messages.last?.id, anchor: .bottom)
@@ -466,7 +467,7 @@ struct BitchatContentView: View {
                 .foregroundStyle(textColor)
                 .autocorrectionDisabled()
                 .focused($isTextFieldFocused)
-                .onChange(of: messageText) { newValue in
+                .onChange(of: messageText) { oldValue, newValue in
                     // Get cursor position (approximate - end of text for now)
                     let cursorPosition = newValue.count
                     viewModel.updateAutocomplete(for: newValue, cursorPosition: cursorPosition)
@@ -916,6 +917,7 @@ struct BitchatContentView: View {
                             }
                         }
                     }
+                    isTextFieldFocused = false
                 }
         )
     }
@@ -977,14 +979,17 @@ struct BitchatContentView: View {
                     .font(.system(size: 14, design: .monospaced))
                     .foregroundStyle(secondaryTextColor)
                 
-                TextField("nickname", text: $viewModel.nickname)
+                TextField("nickname", text: Binding(
+                    get: { viewModel.nickname },
+                    set: { viewModel.nickname = $0 }
+                ))
                     .textFieldStyle(.plain)
                     .font(.system(size: 14, design: .monospaced))
                     .frame(maxWidth: 100)
                     .foregroundStyle(textColor)
-                    .onChange(of: viewModel.nickname) { _ in
+                    .onChange(of: viewModel.nickname, {
                         viewModel.saveNickname()
-                    }
+                    })
                     .onSubmit {
                         viewModel.saveNickname()
                     }
