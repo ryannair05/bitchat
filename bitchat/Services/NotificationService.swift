@@ -29,7 +29,7 @@ class NotificationService {
         }
     }
     
-    func sendLocalNotification(title: String, body: String, identifier: String) {
+    func sendLocalNotification(title: String, body: String, identifier: String, userInfo: [String: Any]? = nil) {
         // For now, skip app state check entirely to avoid thread issues
         // The NotificationDelegate will handle foreground presentation
         DispatchQueue.main.async {
@@ -37,6 +37,9 @@ class NotificationService {
             content.title = title
             content.body = body
             content.sound = .default
+            if let userInfo = userInfo {
+                content.userInfo = userInfo
+            }
             
             let request = UNNotificationRequest(
                 identifier: identifier,
@@ -51,19 +54,20 @@ class NotificationService {
     }
     
     func sendMentionNotification(from sender: String, message: String) {
-        let title = "＠🫵 you were mentioned by \(sender)"
+        let title = "🫵 you were mentioned by \(sender)"
         let body = message
         let identifier = "mention-\(UUID().uuidString)"
         
         sendLocalNotification(title: title, body: body, identifier: identifier)
     }
     
-    func sendPrivateMessageNotification(from sender: String, message: String) {
+    func sendPrivateMessageNotification(from sender: String, message: String, peerID: String) {
         let title = "🔒 private message from \(sender)"
         let body = message
         let identifier = "private-\(UUID().uuidString)"
+        let userInfo = ["peerID": peerID, "senderName": sender]
         
-        sendLocalNotification(title: title, body: body, identifier: identifier)
+        sendLocalNotification(title: title, body: body, identifier: identifier, userInfo: userInfo)
     }
     
     func sendFavoriteOnlineNotification(nickname: String) {
@@ -86,6 +90,15 @@ class NotificationService {
         }
     }
     
+    // Geohash public chat notification with deep link to a specific geohash
+    func sendGeohashActivityNotification(geohash: String, titlePrefix: String = "#", bodyPreview: String) {
+        let title = "\(titlePrefix)\(geohash)"
+        let identifier = "geo-activity-\(geohash)-\(Date().timeIntervalSince1970)"
+        let deeplink = "bitchat://geohash/\(geohash)"
+        let userInfo: [String: Any] = ["deeplink": deeplink]
+        sendLocalNotification(title: title, body: bodyPreview, identifier: identifier, userInfo: userInfo)
+    }
+
     func sendNetworkAvailableNotification(peerCount: Int) {
         let title = "👥 bitchatters nearby!"
         let body = peerCount == 1 ? "1 person around" : "\(peerCount) people around"

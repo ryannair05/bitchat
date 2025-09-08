@@ -6,12 +6,135 @@
 // For more information, see <https://unlicense.org>
 //
 
+///
+/// # NoiseEncryptionService
+///
+/// High-level encryption service that manages Noise Protocol sessions for secure
+/// peer-to-peer communication in BitChat. Acts as the bridge between the transport
+/// layer (BLEService) and the cryptographic layer (NoiseProtocol).
+///
+/// ## Overview
+/// This service provides a simplified API for establishing and managing encrypted
+/// channels between peers. It handles:
+/// - Static identity key management
+/// - Session lifecycle (creation, maintenance, teardown)
+/// - Message encryption/decryption
+/// - Peer authentication and fingerprint tracking
+/// - Automatic rekeying for forward secrecy
+///
+/// ## Architecture
+/// The service operates at multiple levels:
+/// 1. **Identity Management**: Persistent Curve25519 keys stored in Keychain
+/// 2. **Session Management**: Per-peer Noise sessions with state tracking
+/// 3. **Message Processing**: Encryption/decryption with proper framing
+/// 4. **Security Features**: Rate limiting, fingerprint verification
+///
+/// ## Key Features
+///
+/// ### Identity Keys
+/// - Static Curve25519 key pair for Noise XX pattern
+/// - Ed25519 signing key pair for additional authentication
+/// - Keys persisted securely in iOS/macOS Keychain
+/// - Fingerprints derived from SHA256 of public keys
+///
+/// ### Session Management
+/// - Lazy session creation (on-demand when sending messages)
+/// - Automatic session recovery after disconnections
+/// - Configurable rekey intervals for forward secrecy
+/// - Graceful handling of simultaneous handshakes
+///
+/// ### Security Properties
+/// - Forward secrecy via ephemeral keys in handshakes
+/// - Mutual authentication via static key exchange
+/// - Protection against replay attacks
+/// - Rate limiting to prevent DoS attacks
+///
+/// ## Encryption Flow
+/// ```
+/// 1. Message arrives for encryption
+/// 2. Check if session exists for peer
+/// 3. If not, initiate Noise handshake
+/// 4. Once established, encrypt message
+/// 5. Add message type header for protocol handling
+/// 6. Return encrypted payload for transmission
+/// ```
+///
+/// ## Integration Points
+/// - **BLEService**: Calls this service for all private messages
+/// - **ChatViewModel**: Monitors encryption status for UI indicators
+/// - **NoiseHandshakeCoordinator**: Prevents handshake race conditions
+/// - **KeychainManager**: Secure storage for identity keys
+///
+/// ## Thread Safety
+/// - Concurrent read access via reader-writer queue
+/// - Session operations protected by per-peer queues
+/// - Atomic updates for critical state changes
+///
+/// ## Error Handling
+/// - Graceful fallback for encryption failures
+/// - Clear error messages for debugging
+/// - Automatic retry with exponential backoff
+/// - User notification for critical failures
+///
+/// ## Performance Considerations
+/// - Sessions cached in memory for fast access
+/// - Minimal allocations in hot paths
+/// - Efficient binary message format
+/// - Background queue for CPU-intensive operations
+///
+
 import Foundation
 import CryptoKit
 import os.log
 
+// MARK: - Encryption Status
+
+/// Represents the current encryption status of a peer connection.
+/// Used for UI indicators and decision-making about message handling.
+enum EncryptionStatus: Equatable {
+    case none                // Failed or incompatible
+    case noHandshake        // No handshake attempted yet
+    case noiseHandshaking   // Currently establishing
+    case noiseSecured       // Established but not verified
+    case noiseVerified      // Established and verified
+    
+    var icon: String? {  // Made optional to hide icon when no handshake
+        switch self {
+        case .none:
+            return "lock.slash"  // Failed handshake
+        case .noHandshake:
+            return nil  // No icon when no handshake attempted
+        case .noiseHandshaking:
+            return "lock.rotation"
+        case .noiseSecured:
+            return "lock.fill"  // Changed from "lock" to "lock.fill" for filled lock
+        case .noiseVerified:
+            return "checkmark.seal.fill"  // Verified badge
+        }
+    }
+    
+    var description: String {
+        switch self {
+        case .none:
+            return "Encryption failed"
+        case .noHandshake:
+            return "Not encrypted"
+        case .noiseHandshaking:
+            return "Establishing encryption..."
+        case .noiseSecured:
+            return "Encrypted"
+        case .noiseVerified:
+            return "Encrypted & Verified"
+        }
+    }
+}
+
 // MARK: - Noise Encryption Service
 
+/// Manages end-to-end encryption for BitChat using the Noise Protocol Framework.
+/// Provides a high-level API for establishing secure channels between peers,
+/// handling all cryptographic operations transparently.
+/// - Important: This service maintains the device's cryptographic identity
 class NoiseEncryptionService {
     // Static identity key (persistent across sessions)
     private let staticIdentityKey: Curve25519.KeyAgreement.PrivateKey
@@ -23,9 +146,6 @@ class NoiseEncryptionService {
     
     // Session manager
     private let sessionManager: NoiseSessionManager
-    
-    // Channel encryption
-    private let channelEncryption = NoiseChannelEncryption()
     
     // Peer fingerprints (SHA256 hash of static public key)
     private var peerFingerprints: [String: String] = [:] // peerID -> fingerprint
@@ -42,8 +162,25 @@ class NoiseEncryptionService {
     private let rekeyCheckInterval: TimeInterval = 60.0 // Check every minute
     
     // Callbacks
-    var onPeerAuthenticated: ((String, String) -> Void)? // peerID, fingerprint
+    private var onPeerAuthenticatedHandlers: [((String, String) -> Void)] = [] // Array of handlers for peer authentication
     var onHandshakeRequired: ((String) -> Void)? // peerID needs handshake
+    
+    // Add a handler for peer authentication
+    func addOnPeerAuthenticatedHandler(_ handler: @escaping (String, String) -> Void) {
+        serviceQueue.async(flags: .barrier) { [weak self] in
+            self?.onPeerAuthenticatedHandlers.append(handler)
+        }
+    }
+    
+    // Legacy support - setting this will add to the handlers array
+    var onPeerAuthenticated: ((String, String) -> Void)? {
+        get { nil } // Always return nil for backward compatibility
+        set {
+            if let handler = newValue {
+                addOnPeerAuthenticatedHandler(handler)
+            }
+        }
+    }
     
     init() {
         // Load or create static identity key (ONLY from keychain)
@@ -133,7 +270,7 @@ class NoiseEncryptionService {
         let deletedStatic = KeychainManager.shared.deleteIdentityKey(forKey: "noiseStaticKey")
         let deletedSigning = KeychainManager.shared.deleteIdentityKey(forKey: "ed25519SigningKey")
         SecureLogger.logKeyOperation("delete", keyType: "identity keys", success: deletedStatic && deletedSigning)
-        SecureLogger.logSecurityEvent(.invalidKey(reason: "Panic mode activated - identity cleared"), level: .warning)
+        SecureLogger.log("Panic mode activated - identity cleared", category: SecureLogger.security, level: .warning)
         // Stop rekey timer
         stopRekeyTimer()
     }
@@ -159,6 +296,94 @@ class NoiseEncryptionService {
             return false
         }
     }
+
+    // MARK: - Announce Signature Helpers
+
+    /// Build the canonical announce binding message bytes and sign with our Ed25519 key
+    /// - Parameters:
+    ///   - peerID: 8-byte routing ID (as in packet header)
+    ///   - noiseKey: 32-byte Curve25519.KeyAgreement public key
+    ///   - ed25519Key: 32-byte Ed25519 public key (self)
+    ///   - nickname: UTF-8 nickname (<=255 bytes)
+    ///   - timestampMs: UInt64 milliseconds since epoch
+    /// - Returns: Ed25519 signature over the canonical bytes, or nil on failure
+    func buildAnnounceSignature(peerID: Data, noiseKey: Data, ed25519Key: Data, nickname: String, timestampMs: UInt64) -> Data? {
+        let message = canonicalAnnounceBytes(peerID: peerID, noiseKey: noiseKey, ed25519Key: ed25519Key, nickname: nickname, timestampMs: timestampMs)
+        return signData(message)
+    }
+
+    /// Verify an announce signature
+    func verifyAnnounceSignature(signature: Data, peerID: Data, noiseKey: Data, ed25519Key: Data, nickname: String, timestampMs: UInt64, publicKey: Data) -> Bool {
+        let message = canonicalAnnounceBytes(peerID: peerID, noiseKey: noiseKey, ed25519Key: ed25519Key, nickname: nickname, timestampMs: timestampMs)
+        return verifySignature(signature, for: message, publicKey: publicKey)
+    }
+
+    /// Build canonical bytes for announce signing.
+    private func canonicalAnnounceBytes(peerID: Data, noiseKey: Data, ed25519Key: Data, nickname: String, timestampMs: UInt64) -> Data {
+        var out = Data()
+        // context
+        let context = "bitchat-announce-v1".data(using: .utf8) ?? Data()
+        out.append(UInt8(min(context.count, 255)))
+        out.append(context.prefix(255))
+        // peerID (expect 8 bytes; pad/truncate to 8 for canonicalization)
+        let peerID8 = peerID.prefix(8)
+        out.append(peerID8)
+        if peerID8.count < 8 { out.append(Data(repeating: 0, count: 8 - peerID8.count)) }
+        // noise static key (expect 32)
+        let noise32 = noiseKey.prefix(32)
+        out.append(noise32)
+        if noise32.count < 32 { out.append(Data(repeating: 0, count: 32 - noise32.count)) }
+        // ed25519 public key (expect 32)
+        let ed32 = ed25519Key.prefix(32)
+        out.append(ed32)
+        if ed32.count < 32 { out.append(Data(repeating: 0, count: 32 - ed32.count)) }
+        // nickname length + bytes
+        let nickData = nickname.data(using: .utf8) ?? Data()
+        out.append(UInt8(min(nickData.count, 255)))
+        out.append(nickData.prefix(255))
+        // timestamp
+        var ts = timestampMs.bigEndian
+        withUnsafeBytes(of: &ts) { raw in out.append(contentsOf: raw) }
+        return out
+    }
+    
+    // MARK: - Packet Signing/Verification
+    
+    /// Sign a BitchatPacket using the noise private key
+    func signPacket(_ packet: BitchatPacket) -> BitchatPacket? {
+        // Create canonical packet bytes for signing
+        guard let packetData = packet.toBinaryDataForSigning() else {
+            return nil
+        }
+        
+        // Sign with the noise private key (converted to Ed25519 for signing)
+        guard let signature = signData(packetData) else {
+            return nil
+        }
+        
+        // Return new packet with signature
+        var signedPacket = packet
+        signedPacket.signature = signature
+        return signedPacket
+    }
+    
+    /// Verify a BitchatPacket signature using the provided public key
+    func verifyPacketSignature(_ packet: BitchatPacket, publicKey: Data) -> Bool {
+        guard let signature = packet.signature else {
+            return false
+        }
+        
+        // Create canonical packet bytes for verification (without signature)
+        
+        guard let packetData = packet.toBinaryDataForSigning() else {
+            return false
+        }
+        
+        // For noise public keys, we need to derive the Ed25519 key for verification
+        // This assumes the noise key can be used for Ed25519 signing
+        return verifySignature(signature, for: packetData, publicKey: publicKey)
+    }
+
     
     // MARK: - Handshake Management
     
@@ -299,24 +524,6 @@ class NoiseEncryptionService {
         SecureLogger.logSecurityEvent(.sessionExpired(peerID: peerID))
     }
     
-    /// Migrate session when peer ID changes
-    func migratePeerSession(from oldPeerID: String, to newPeerID: String, fingerprint: String) {
-        // First update the fingerprint mappings
-        serviceQueue.sync(flags: .barrier) {
-            // Remove old mapping
-            if let oldFingerprint = peerFingerprints[oldPeerID], oldFingerprint == fingerprint {
-                peerFingerprints.removeValue(forKey: oldPeerID)
-            }
-            
-            // Add new mapping
-            peerFingerprints[newPeerID] = fingerprint
-            fingerprintToPeerID[fingerprint] = newPeerID
-        }
-        
-        // Migrate the session in session manager
-        sessionManager.migrateSession(from: oldPeerID, to: newPeerID)
-    }
-    
     // MARK: - Private Helpers
     
     private func handleSessionEstablished(peerID: String, remoteStaticKey: Curve25519.KeyAgreement.PublicKey) {
@@ -332,77 +539,19 @@ class NoiseEncryptionService {
         // Log security event
         SecureLogger.logSecurityEvent(.handshakeCompleted(peerID: peerID))
         
-        // Notify about authentication
-        onPeerAuthenticated?(peerID, fingerprint)
+        // Notify all handlers about authentication
+        serviceQueue.async { [weak self] in
+            self?.onPeerAuthenticatedHandlers.forEach { handler in
+                handler(peerID, fingerprint)
+            }
+        }
     }
     
     private func calculateFingerprint(for publicKey: Curve25519.KeyAgreement.PublicKey) -> String {
         let hash = SHA256.hash(data: publicKey.rawRepresentation)
         return hash.map { String(format: "%02x", $0) }.joined()
     }
-    
-    // MARK: - Channel Encryption
-    
-    /// Set password for a channel
-    func setChannelPassword(_ password: String, for channel: String) {
-        // Validate channel name
-        guard NoiseSecurityValidator.validateChannelName(channel) else {
-            SecureLogger.log("Invalid channel name for password", category: SecureLogger.security, level: .warning)
-            return
-        }
         
-        // Validate password is not empty
-        guard !password.isEmpty else {
-            SecureLogger.log("Empty password rejected for channel", category: SecureLogger.security, level: .warning)
-            return
-        }
-        
-        channelEncryption.setChannelPassword(password, for: channel)
-        SecureLogger.logKeyOperation("set", keyType: "channel password", success: true)
-    }
-    
-    /// Load channel password from keychain
-    func loadChannelPassword(for channel: String) -> Bool {
-        return channelEncryption.loadChannelPassword(for: channel)
-    }
-    
-    /// Remove channel password
-    func removeChannelPassword(for channel: String) {
-        channelEncryption.removeChannelPassword(for: channel)
-    }
-    
-    /// Encrypt message for a channel
-    func encryptChannelMessage(_ message: String, for channel: String) throws -> Data {
-        return try channelEncryption.encryptChannelMessage(message, for: channel)
-    }
-    
-    /// Decrypt channel message
-    func decryptChannelMessage(_ encryptedData: Data, for channel: String) throws -> String {
-        return try channelEncryption.decryptChannelMessage(encryptedData, for: channel)
-    }
-    
-    /// Share channel password with a peer securely via Noise
-    func shareChannelPassword(_ password: String, channel: String, with peerID: String) throws -> Data? {
-        // Create channel key packet
-        guard let keyPacket = channelEncryption.createChannelKeyPacket(password: password, channel: channel) else {
-            return nil
-        }
-        
-        // Encrypt via Noise session
-        return try encrypt(keyPacket, for: peerID)
-    }
-    
-    /// Process received channel key via Noise
-    func processReceivedChannelKey(_ encryptedData: Data, from peerID: String) throws {
-        // Decrypt via Noise session
-        let decryptedData = try decrypt(encryptedData, from: peerID)
-        
-        // Process channel key packet
-        if let (channel, password) = channelEncryption.processChannelKeyPacket(decryptedData) {
-            setChannelPassword(password, for: channel)
-        }
-    }
-    
     // MARK: - Session Maintenance
     
     private func startRekeyTimer() {
@@ -424,7 +573,7 @@ class NoiseEncryptionService {
             // Attempt to rekey the session
             do {
                 try sessionManager.initiateRekey(for: peerID)
-                SecureLogger.logSecurityEvent(.keyRotation(channel: peerID))
+                SecureLogger.log("Key rotation initiated for peer: \(peerID)", category: SecureLogger.security, level: .debug)
                 
                 // Signal that handshake is needed
                 onHandshakeRequired?(peerID)
@@ -441,6 +590,8 @@ class NoiseEncryptionService {
 
 // MARK: - Protocol Message Types for Noise
 
+/// Message types for the Noise encryption protocol layer.
+/// These types wrap the underlying BitChat protocol messages with encryption metadata.
 enum NoiseMessageType: UInt8 {
     case handshakeInitiation = 0x10
     case handshakeResponse = 0x11
@@ -451,6 +602,9 @@ enum NoiseMessageType: UInt8 {
 
 // MARK: - Noise Message Wrapper
 
+/// Container for encrypted messages in the Noise protocol.
+/// Provides versioning and type information for proper message handling.
+/// The actual message content is encrypted in the payload field.
 struct NoiseMessage: Codable {
     let type: UInt8
     let sessionID: String  // Random ID for this handshake session

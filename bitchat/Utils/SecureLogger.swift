@@ -22,6 +22,16 @@ class SecureLogger {
     static let keychain = OSLog(subsystem: subsystem, category: "keychain")
     static let session = OSLog(subsystem: subsystem, category: "session")
     static let security = OSLog(subsystem: subsystem, category: "security")
+    static let handshake = OSLog(subsystem: subsystem, category: "handshake")
+    
+    // MARK: - Timestamp Formatter
+    
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        formatter.timeZone = TimeZone.current
+        return formatter
+    }()
     
     // MARK: - Cached Regex Patterns
     
@@ -48,6 +58,16 @@ class SecureLogger {
         case error
         case fault
         
+        fileprivate var order: Int {
+            switch self {
+            case .debug: return 0
+            case .info: return 1
+            case .warning: return 2
+            case .error: return 3
+            case .fault: return 4
+            }
+        }
+        
         var osLogType: OSLogType {
             switch self {
             case .debug: return .debug
@@ -58,6 +78,24 @@ class SecureLogger {
             }
         }
     }
+
+    // MARK: - Global Threshold
+
+    /// Minimum level that will be logged. Defaults to .info. Override via env BITCHAT_LOG_LEVEL.
+    private static let minimumLevel: LogLevel = {
+        let env = ProcessInfo.processInfo.environment["BITCHAT_LOG_LEVEL"]?.lowercased()
+        switch env {
+        case "debug": return .debug
+        case "warning": return .warning
+        case "error": return .error
+        case "fault": return .fault
+        default: return .info
+        }
+    }()
+
+    private static func shouldLog(_ level: LogLevel) -> Bool {
+        return level.order >= minimumLevel.order
+    }
     
     // MARK: - Security Event Types
     
@@ -66,9 +104,6 @@ class SecureLogger {
         case handshakeCompleted(peerID: String)
         case handshakeFailed(peerID: String, error: String)
         case sessionExpired(peerID: String)
-        case keyRotation(channel: String)
-        case invalidKey(reason: String)
-        case replayAttackDetected(channel: String)
         case authenticationFailed(peerID: String)
         
         var message: String {
@@ -81,12 +116,6 @@ class SecureLogger {
                 return "Handshake failed with peer: \(sanitize(peerID)), error: \(error)"
             case .sessionExpired(let peerID):
                 return "Session expired for peer: \(sanitize(peerID))"
-            case .keyRotation(let channel):
-                return "Key rotation performed for channel: \(sanitize(channel))"
-            case .invalidKey(let reason):
-                return "Invalid key detected: \(reason)"
-            case .replayAttackDetected(let channel):
-                return "Replay attack detected on channel: \(sanitize(channel))"
             case .authenticationFailed(let peerID):
                 return "Authentication failed for peer: \(sanitize(peerID))"
             }
@@ -98,6 +127,7 @@ class SecureLogger {
     /// Log a security event
     static func logSecurityEvent(_ event: SecurityEvent, level: LogLevel = .info, 
                                  file: String = #file, line: Int = #line, function: String = #function) {
+        guard shouldLog(level) else { return }
         let location = formatLocation(file: file, line: line, function: function)
         let message = "\(location) \(event.message)"
         
@@ -110,10 +140,11 @@ class SecureLogger {
     }
     
     /// Log general messages with automatic sensitive data filtering
-    static func log(_ message: String, category: OSLog = noise, level: LogLevel = .debug,
+    static func log(_ message: @autoclosure () -> String, category: OSLog = noise, level: LogLevel = .debug,
                     file: String = #file, line: Int = #line, function: String = #function) {
+        guard shouldLog(level) else { return }
         let location = formatLocation(file: file, line: line, function: function)
-        let sanitized = sanitize("\(location) \(message)")
+        let sanitized = sanitize("\(location) \(message())")
         
         #if DEBUG
         os_log("%{public}@", log: category, type: level.osLogType, sanitized)
@@ -126,10 +157,10 @@ class SecureLogger {
     }
     
     /// Log errors with context
-    static func logError(_ error: Error, context: String, category: OSLog = noise,
+    static func logError(_ error: Error, context: @autoclosure () -> String, category: OSLog = noise,
                         file: String = #file, line: Int = #line, function: String = #function) {
         let location = formatLocation(file: file, line: line, function: function)
-        let sanitized = sanitize(context)
+        let sanitized = sanitize(context())
         let errorDesc = sanitize(error.localizedDescription)
         
         #if DEBUG
@@ -144,7 +175,8 @@ class SecureLogger {
     /// Format location information for logging
     private static func formatLocation(file: String, line: Int, function: String) -> String {
         let fileName = (file as NSString).lastPathComponent
-        return "[\(fileName):\(line) \(function)]"
+        let timestamp = timestampFormatter.string(from: Date())
+        return "[\(timestamp)] [\(fileName):\(line) \(function)]"
     }
     
     /// Sanitize strings to remove potentially sensitive data
@@ -227,7 +259,7 @@ extension SecureLogger {
     /// Log key management operations
     static func logKeyOperation(_ operation: String, keyType: String, success: Bool = true,
                                file: String = #file, line: Int = #line, function: String = #function) {
-        let level: LogLevel = success ? .info : .error
+        let level: LogLevel = success ? .debug : .error
         log("Key operation '\(operation)' for \(keyType) \(success ? "succeeded" : "failed")", 
             category: keychain, level: level, file: file, line: line, function: function)
     }

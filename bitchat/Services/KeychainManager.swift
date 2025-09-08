@@ -17,138 +17,35 @@ class KeychainManager {
     private let service = "chat.bitchat"
     private let appGroup = "group.chat.bitchat"
     
-    private init() {
-        // Clean up legacy keychain items on first run
-        cleanupLegacyKeychainItems()
-    }
-    
-    private func cleanupLegacyKeychainItems() {
-        // Check if we've already done cleanup
-        let cleanupKey = "bitchat.keychain.cleanup.v2"
-        if UserDefaults.standard.bool(forKey: cleanupKey) {
-            return
-        }
-        
-        
-        // List of old service names to migrate from
-        let legacyServices = [
-            "com.bitchat.passwords",
-            "com.bitchat.deviceidentity",
-            "com.bitchat.noise.identity",
-            "chat.bitchat.passwords",
-            "bitchat.keychain"
-        ]
-        
-        var migratedItems = 0
-        
-        // Try to migrate identity keys
-        for oldService in legacyServices {
-            // Check for noise identity key
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: oldService,
-                kSecAttrAccount as String: "identity_noiseStaticKey",
-                kSecReturnData as String: true
-            ]
-            
-            var result: AnyObject?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            
-            if status == errSecSuccess, let data = result as? Data {
-                // Save to new service
-                if saveIdentityKey(data, forKey: "noiseStaticKey") {
-                    migratedItems += 1
-                    SecureLogger.logKeyOperation("migrate", keyType: "noiseStaticKey", success: true)
-                }
-                // Delete from old service
-                let deleteQuery: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: oldService,
-                    kSecAttrAccount as String: "identity_noiseStaticKey"
-                ]
-                SecItemDelete(deleteQuery as CFDictionary)
-            }
-        }
-        
-        // Clean up all other legacy items
-        for oldService in legacyServices {
-            let deleteQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: oldService
-            ]
-            
-            SecItemDelete(deleteQuery as CFDictionary)
-        }
-        
-        
-        // Mark cleanup as done
-        UserDefaults.standard.set(true, forKey: cleanupKey)
-    }
+    private init() {}
     
     
     private func isSandboxed() -> Bool {
         #if os(macOS)
+        // More robust sandbox detection using multiple methods
+        
+        // Method 1: Check environment variable (can be spoofed)
         let environment = ProcessInfo.processInfo.environment
-        return environment["APP_SANDBOX_CONTAINER_ID"] != nil
+        let hasEnvVar = environment["APP_SANDBOX_CONTAINER_ID"] != nil
+        
+        // Method 2: Check if we can access a path outside sandbox
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let testPath = homeDir.appendingPathComponent("../../../tmp/bitchat_sandbox_test_\(UUID().uuidString)")
+        let canWriteOutsideSandbox = FileManager.default.createFile(atPath: testPath.path, contents: nil, attributes: nil)
+        if canWriteOutsideSandbox {
+            try? FileManager.default.removeItem(at: testPath)
+        }
+        
+        // Method 3: Check container path
+        let containerPath = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.path ?? ""
+        let hasContainerPath = containerPath.contains("/Containers/")
+        
+        // If any method indicates sandbox, we consider it sandboxed
+        return hasEnvVar || !canWriteOutsideSandbox || hasContainerPath
         #else
-        return false
+        // iOS is always sandboxed
+        return true
         #endif
-    }
-    
-    // MARK: - Channel Passwords
-    
-    func saveChannelPassword(_ password: String, for channel: String) -> Bool {
-        let key = "channel_\(channel)"
-        let result = save(password, forKey: key)
-        SecureLogger.logKeyOperation("save", keyType: "channel password for \(channel)", success: result)
-        return result
-    }
-    
-    func getChannelPassword(for channel: String) -> String? {
-        let key = "channel_\(channel)"
-        return retrieve(forKey: key)
-    }
-    
-    func deleteChannelPassword(for channel: String) -> Bool {
-        let key = "channel_\(channel)"
-        let result = delete(forKey: key)
-        SecureLogger.logKeyOperation("delete", keyType: "channel password for \(channel)", success: result)
-        return result
-    }
-    
-    func getAllChannelPasswords() -> [String: String] {
-        var passwords: [String: String] = [:]
-        
-        // Build query without kSecReturnData to avoid error -50
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true
-        ]
-        
-        // For sandboxed apps, use the app group
-        if isSandboxed() {
-            query[kSecAttrAccessGroup as String] = appGroup
-        }
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecSuccess, let items = result as? [[String: Any]] {
-            for item in items {
-                if let account = item[kSecAttrAccount as String] as? String,
-                   account.hasPrefix("channel_") {
-                    // Now retrieve the actual password data for this specific item
-                    let channel = String(account.dropFirst(8)) // Remove "channel_" prefix
-                    if let password = getChannelPassword(for: channel) {
-                        passwords[channel] = password
-                    }
-                }
-            }
-        }
-        
-        return passwords
     }
     
     // MARK: - Identity Keys
@@ -182,39 +79,44 @@ class KeychainManager {
         // Delete any existing item first to ensure clean state
         _ = delete(forKey: key)
         
-        // Build query with all necessary attributes for sandboxed apps
-        var query: [String: Any] = [
+        // Build base query
+        var base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
             kSecValueData as String: data,
             kSecAttrService as String: service,
-            // Important for sandboxed apps: make it accessible when unlocked
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
+            kSecAttrLabel as String: "bitchat-\(key)"
         ]
-        
-        // Add a label for easier debugging
-        query[kSecAttrLabel as String] = "bitchat-\(key)"
-        
-        // For sandboxed apps, use the app group for sharing between app instances
-        if isSandboxed() {
-            query[kSecAttrAccessGroup as String] = appGroup
-        }
-        
-        // For sandboxed macOS apps, we need to ensure the item is NOT synchronized
         #if os(macOS)
-        query[kSecAttrSynchronizable as String] = false
+        base[kSecAttrSynchronizable as String] = false
         #endif
-        
-        let status = SecItemAdd(query as CFDictionary, nil)
-        
-        if status == errSecSuccess {
-            return true
-        } else if status == -34018 {
+
+        // Try with access group where it is expected to work (iOS app builds)
+        var triedWithoutGroup = false
+        func attempt(addAccessGroup: Bool) -> OSStatus {
+            var query = base
+            if addAccessGroup { query[kSecAttrAccessGroup as String] = appGroup }
+            return SecItemAdd(query as CFDictionary, nil)
+        }
+
+        #if os(iOS)
+        var status = attempt(addAccessGroup: true)
+        if status == -34018 { // Missing entitlement, retry without access group
+            triedWithoutGroup = true
+            status = attempt(addAccessGroup: false)
+        }
+        #else
+        // On macOS dev/simulator default to no access group to avoid -34018
+        let status = attempt(addAccessGroup: false)
+        #endif
+
+        if status == errSecSuccess { return true }
+        if status == -34018 && !triedWithoutGroup {
             SecureLogger.logError(NSError(domain: "Keychain", code: -34018), context: "Missing keychain entitlement", category: SecureLogger.keychain)
         } else if status != errSecDuplicateItem {
             SecureLogger.logError(NSError(domain: "Keychain", code: Int(status)), context: "Error saving to keychain", category: SecureLogger.keychain)
         }
-        
         return false
     }
     
@@ -224,45 +126,56 @@ class KeychainManager {
     }
     
     private func retrieveData(forKey key: String) -> Data? {
-        var query: [String: Any] = [
+        // Base query
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
             kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        
-        // For sandboxed apps, use the app group
-        if isSandboxed() {
-            query[kSecAttrAccessGroup as String] = appGroup
-        }
-        
+
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecSuccess {
-            return result as? Data
-        } else if status == -34018 {
+        func attempt(withAccessGroup: Bool) -> OSStatus {
+            var q = base
+            if withAccessGroup { q[kSecAttrAccessGroup as String] = appGroup }
+            return SecItemCopyMatching(q as CFDictionary, &result)
+        }
+
+        #if os(iOS)
+        var status = attempt(withAccessGroup: true)
+        if status == -34018 { status = attempt(withAccessGroup: false) }
+        #else
+        let status = attempt(withAccessGroup: false)
+        #endif
+
+        if status == errSecSuccess { return result as? Data }
+        if status == -34018 {
             SecureLogger.logError(NSError(domain: "Keychain", code: -34018), context: "Missing keychain entitlement", category: SecureLogger.keychain)
         }
-        
         return nil
     }
     
     private func delete(forKey key: String) -> Bool {
-        // Build basic query
-        var query: [String: Any] = [
+        // Base delete query
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
             kSecAttrService as String: service
         ]
-        
-        // For sandboxed apps, use the app group
-        if isSandboxed() {
-            query[kSecAttrAccessGroup as String] = appGroup
+
+        func attempt(withAccessGroup: Bool) -> OSStatus {
+            var q = base
+            if withAccessGroup { q[kSecAttrAccessGroup as String] = appGroup }
+            return SecItemDelete(q as CFDictionary)
         }
-        
-        let status = SecItemDelete(query as CFDictionary)
+
+        #if os(iOS)
+        var status = attempt(withAccessGroup: true)
+        if status == -34018 { status = attempt(withAccessGroup: false) }
+        #else
+        let status = attempt(withAccessGroup: false)
+        #endif
         return status == errSecSuccess || status == errSecItemNotFound
     }
     
@@ -282,15 +195,10 @@ class KeychainManager {
         return status == errSecSuccess || status == errSecItemNotFound
     }
     
-    // Force cleanup to run again (for development/testing)
-    func resetCleanupFlag() {
-        UserDefaults.standard.removeObject(forKey: "bitchat.keychain.cleanup.v2")
-    }
-    
     
     // Delete ALL keychain data for panic mode
     func deleteAllKeychainData() -> Bool {
-        SecureLogger.logSecurityEvent(.invalidKey(reason: "Panic mode - deleting all keychain data"), level: .warning)
+        SecureLogger.log("Panic mode - deleting all keychain data", category: SecureLogger.security, level: .warning)
         
         var totalDeleted = 0
         
@@ -309,10 +217,25 @@ class KeychainManager {
                 var shouldDelete = false
                 let account = item[kSecAttrAccount as String] as? String ?? ""
                 let service = item[kSecAttrService as String] as? String ?? ""
+                let accessGroup = item[kSecAttrAccessGroup as String] as? String
                 
-                // ONLY delete if service name contains "bitchat"
-                // This is the safest approach - we only touch items we know are ours
-                if service.lowercased().contains("bitchat") {
+                // More precise deletion criteria:
+                // 1. Check for our specific app group
+                // 2. OR check for our exact service name
+                // 3. OR check for known legacy service names
+                if accessGroup == appGroup {
+                    shouldDelete = true
+                } else if service == self.service {
+                    shouldDelete = true
+                } else if [
+                    "com.bitchat.passwords",
+                    "com.bitchat.deviceidentity",
+                    "com.bitchat.noise.identity",
+                    "chat.bitchat.passwords",
+                    "bitchat.keychain",
+                    "bitchat",
+                    "com.bitchat"
+                ].contains(service) {
                     shouldDelete = true
                 }
                 
@@ -344,9 +267,10 @@ class KeychainManager {
             }
         }
         
-        // Also try to delete by known service names (in case we missed any)
+        // Also try to delete by known service names and app group
+        // This catches any items that might have been missed above
         let knownServices = [
-            "chat.bitchat",
+            self.service,  // Current service name
             "com.bitchat.passwords",
             "com.bitchat.deviceidentity", 
             "com.bitchat.noise.identity",
@@ -368,9 +292,40 @@ class KeychainManager {
             }
         }
         
+        // Also delete by app group to ensure complete cleanup
+        let groupQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccessGroup as String: appGroup
+        ]
+        
+        let groupStatus = SecItemDelete(groupQuery as CFDictionary)
+        if groupStatus == errSecSuccess {
+            totalDeleted += 1
+        }
+        
         SecureLogger.log("Panic mode cleanup completed. Total items deleted: \(totalDeleted)", category: SecureLogger.keychain, level: .warning)
         
         return totalDeleted > 0
+    }
+    
+    // MARK: - Security Utilities
+    
+    /// Securely clear sensitive data from memory
+    static func secureClear(_ data: inout Data) {
+        _ = data.withUnsafeMutableBytes { bytes in
+            // Use volatile memset to prevent compiler optimization
+            memset_s(bytes.baseAddress, bytes.count, 0, bytes.count)
+        }
+        data = Data() // Clear the data object
+    }
+    
+    /// Securely clear sensitive string from memory
+    static func secureClear(_ string: inout String) {
+        // Convert to mutable data and clear
+        if var data = string.data(using: .utf8) {
+            secureClear(&data)
+        }
+        string = "" // Clear the string object
     }
     
     // MARK: - Debug
@@ -378,77 +333,5 @@ class KeychainManager {
     func verifyIdentityKeyExists() -> Bool {
         let key = "identity_noiseStaticKey"
         return retrieveData(forKey: key) != nil
-    }
-    
-    // Aggressive cleanup for legacy items - can be called manually
-    func aggressiveCleanupLegacyItems() -> Int {
-        var deletedCount = 0
-        
-        // List of KNOWN bitchat service names from our development history
-        let knownBitchatServices = [
-            "com.bitchat.passwords",
-            "com.bitchat.deviceidentity",
-            "com.bitchat.noise.identity",
-            "chat.bitchat.passwords",
-            "bitchat.keychain",
-            "Bitchat",
-            "BitChat"
-        ]
-        
-        // First, delete all items from known legacy services
-        for legacyService in knownBitchatServices {
-            let deleteQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: legacyService
-            ]
-            
-            let status = SecItemDelete(deleteQuery as CFDictionary)
-            if status == errSecSuccess {
-                deletedCount += 1
-            }
-        }
-        
-        // Now search for items that have our specific account patterns with bitchat service names
-        let searchQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(searchQuery as CFDictionary, &result)
-        
-        if status == errSecSuccess, let items = result as? [[String: Any]] {
-            for item in items {
-                let account = item[kSecAttrAccount as String] as? String ?? ""
-                let service = item[kSecAttrService as String] as? String ?? ""
-                
-                // ONLY delete if service name contains "bitchat" somewhere
-                // This ensures we never touch other apps' keychain items
-                var shouldDelete = false
-                
-                // Check if service contains "bitchat" (case insensitive) but NOT our current service
-                let serviceLower = service.lowercased()
-                if service != self.service && serviceLower.contains("bitchat") {
-                    shouldDelete = true
-                }
-                
-                if shouldDelete {
-                    // Build precise delete query
-                    let deleteQuery: [String: Any] = [
-                        kSecClass as String: kSecClassGenericPassword,
-                        kSecAttrService as String: service,
-                        kSecAttrAccount as String: account
-                    ]
-                    
-                    let deleteStatus = SecItemDelete(deleteQuery as CFDictionary)
-                    if deleteStatus == errSecSuccess {
-                        deletedCount += 1
-                    }
-                }
-            }
-        }
-        
-        return deletedCount
     }
 }
